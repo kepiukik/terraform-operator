@@ -491,7 +491,7 @@ func newTaskOptions(tf *tfv1beta1.Terraform, task tfv1beta1.TaskName, generation
 	}
 }
 
-const terraformFinalizer = "finalizer.tf.galleybytes.com"
+const terraformFinalizer = "finalizer.tf.galleybytes.com/finalizer"
 
 // Reconcile reads that state of the cluster for a Terraform object and makes changes based on the state read
 // and what is in the Terraform.Spec
@@ -1486,7 +1486,7 @@ func IsJobFinished(job *batchv1.Job) bool {
 	return job.Status.CompletionTime != nil || (job.Status.Active == 0 && BackoffLimit != nil && job.Status.Failed >= *BackoffLimit)
 }
 
-func formatJobSSHConfig(ctx context.Context, reqLogger logr.Logger, tf *tfv1beta1.Terraform, k8sclient client.Client) (map[string][]byte, error) {
+func (r *ReconcileTerraform) formatJobSSHConfig(ctx context.Context, reqLogger logr.Logger, tf *tfv1beta1.Terraform) (map[string][]byte, error) {
 	data := make(map[string]string)
 	dataAsByte := make(map[string][]byte)
 	if tf.Spec.SSHTunnel != nil {
@@ -1507,7 +1507,7 @@ func formatJobSSHConfig(ctx context.Context, reqLogger logr.Logger, tf *tfv1beta
 			ns = tf.Namespace
 		}
 
-		key, err := loadPassword(ctx, k8sclient, k, tf.Spec.SSHTunnel.SSHKeySecretRef.Name, ns)
+		key, err := loadPassword(ctx, r.Client, k, tf.Spec.SSHTunnel.SSHKeySecretRef.Name, ns)
 		if err != nil {
 			return dataAsByte, err
 		}
@@ -1547,7 +1547,10 @@ func formatJobSSHConfig(ctx context.Context, reqLogger logr.Logger, tf *tfv1beta
 			if ns == "" {
 				ns = tf.Namespace
 			}
-			key, err := loadPassword(ctx, k8sclient, k, m.Git.SSH.SSHKeySecretRef.Name, ns)
+			if m.Git.SSH.SSHKeySecretRef.TakeOwnership {
+				r.takeGitSecretOwnership(ctx, tf, m.Git.SSH.SSHKeySecretRef.Name, m.Git.SSH.SSHKeySecretRef.Namespace)
+			}
+			key, err := loadPassword(ctx, r.Client, k, m.Git.SSH.SSHKeySecretRef.Name, ns)
 			if err != nil {
 				return dataAsByte, err
 			}
@@ -1633,6 +1636,10 @@ func (r *ReconcileTerraform) setupAndRun(ctx context.Context, tf *tfv1beta1.Terr
 				if tokenSecret.Key == "" {
 					tokenSecret.Key = "token"
 				}
+				//
+				if m.Git.HTTPS.TokenSecretRef.TakeOwnership {
+					r.takeGitSecretOwnership(ctx, tf, tokenSecret.Name, tokenSecret.Namespace)
+				}
 				gitAskpass, err := r.createGitAskpass(ctx, tokenSecret)
 				if err != nil {
 					return err
@@ -1643,7 +1650,7 @@ func (r *ReconcileTerraform) setupAndRun(ctx context.Context, tf *tfv1beta1.Terr
 		}
 
 		// Set up the SSH keys to use if defined
-		sshConfigData, err := formatJobSSHConfig(ctx, reqLogger, tf, r.Client)
+		sshConfigData, err := r.formatJobSSHConfig(ctx, reqLogger, tf)
 		if err != nil {
 			r.Recorder.Event(tf, "Warning", "SSHConfigError", fmt.Errorf("%v", err).Error())
 			return fmt.Errorf("error setting up sshconfig: %v", err)
@@ -2702,6 +2709,70 @@ func (r ReconcileTerraform) loadSecret(ctx context.Context, name, namespace stri
 		return secret, err
 	}
 	return secret, nil
+}
+
+type gitSecret struct {
+	Name      string
+	Namespace string
+}
+
+type gitSecretDump struct {
+	gitSecrets  []gitSecret
+	initialized bool
+}
+
+func (g *gitSecretDump) make(tf *tfv1beta1.Terraform) {
+	for _, item := range tf.Spec.SCMAuthMethods {
+		if item.Git.HTTPS != nil {
+			secret := gitSecret{Name: item.Git.HTTPS.TokenSecretRef.Name}
+			if item.Git.HTTPS.TokenSecretRef.Namespace == "" {
+				secret.Namespace = "default"
+			}
+			g.gitSecrets = append(g.gitSecrets, secret)
+		}
+		if item.Git.SSH != nil {
+			secret := gitSecret{Name: item.Git.SSH.SSHKeySecretRef.Name}
+			if item.Git.SSH.SSHKeySecretRef.Namespace == "" {
+				secret.Namespace = "default"
+			}
+			g.gitSecrets = append(g.gitSecrets, secret)
+		}
+		if len(g.gitSecrets) > 0 {
+			g.initialized = true
+		}
+	}
+}
+
+func (r ReconcileTerraform) takeGitSecretOwnership(ctx context.Context, tf *tfv1beta1.Terraform, name, namespace string) error {
+	secret, err := r.loadSecret(ctx, name, namespace)
+	if err != nil {
+		return err
+	}
+	controllerutil.SetControllerReference(tf, secret, r.Scheme)
+	if !controllerutil.ContainsFinalizer(secret, terraformFinalizer) {
+		// Вставить логгер
+		fmt.Println("Adding secret finalizer")
+		controllerutil.AddFinalizer(secret, terraformFinalizer)
+		err := r.Client.Update(ctx, secret)
+		fmt.Println(err)
+	}
+	return nil
+}
+
+func (r ReconcileTerraform) removeGitSecretOwnership(ctx context.Context, tf *tfv1beta1.Terraform, name, namespace string) error {
+	fmt.Println("testfunc")
+	secret, err := r.loadSecret(ctx, name, namespace)
+	if err != nil {
+		return err
+	}
+	if controllerutil.ContainsFinalizer(secret, terraformFinalizer) {
+		// Вставить логгер
+		fmt.Println("Removing secret finalizer")
+		controllerutil.RemoveFinalizer(secret, terraformFinalizer)
+		err := r.Client.Update(ctx, secret)
+		fmt.Println(err)
+	}
+	return nil
 }
 
 func (r ReconcileTerraform) cacheNodeSelectors(ctx context.Context, logger logr.Logger) error {

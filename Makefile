@@ -1,5 +1,6 @@
-PKG ?= github.com/galleybytes/terraform-operator
-DOCKER_REPO ?= ghcr.io/galleybytes
+# PKG ?= github.com/kepiukik/terraform-operator
+# DOCKER_REPO ?= ghcr.io/kepiukik
+DOCKER_REPO ?= kepiukik
 IMAGE_NAME ?= terraform-operator
 DEPLOYMENT ?= ${IMAGE_NAME}
 NAMESPACE ?= tf-system
