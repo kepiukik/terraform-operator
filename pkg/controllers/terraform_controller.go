@@ -534,7 +534,7 @@ func (r *ReconcileTerraform) Reconcile(ctx context.Context, request reconcile.Re
 	// Final delete by removing finalizers
 	if tf.Status.Phase == tfv1beta1.PhaseDeleted {
 		reqLogger.Info("Remove finalizers")
-		_ = r.updateFinalizer(tf, ctx)
+		_ = r.updateFinalizer(tf, reqLogger, ctx)
 		err := r.update(ctx, tf)
 		if err != nil {
 			r.Recorder.Event(tf, "Warning", "ProcessingError", err.Error())
@@ -544,7 +544,7 @@ func (r *ReconcileTerraform) Reconcile(ctx context.Context, request reconcile.Re
 	}
 
 	// Finalizers
-	if r.updateFinalizer(tf, ctx) {
+	if r.updateFinalizer(tf, reqLogger, ctx) {
 		err := r.update(ctx, tf)
 		if err != nil {
 			return reconcile.Result{}, err
@@ -1370,21 +1370,47 @@ func (r ReconcileTerraform) createPluginPod(ctx context.Context, logger logr.Log
 //
 // The finalizer will be responsible for starting the destroy-workflow.
 
-func (r *ReconcileTerraform) updateFinalizer(tf *tfv1beta1.Terraform, ctx context.Context) bool {
+func (r *ReconcileTerraform) updateFinalizer(tf *tfv1beta1.Terraform, reqLogger logr.Logger, ctx context.Context) bool {
 	finalizers := tf.GetFinalizers()
 
-	checkSecret := func(tf *tfv1beta1.Terraform) {
+	// Extra logic for locking secrets from tf.Spec.SCMAuthMethods via finalizer
+	// Shoud it force reconcile loop retry on fail?
+	finalizeSecret := func(tf *tfv1beta1.Terraform, action string) {
 		for _, m := range tf.Spec.SCMAuthMethods {
 			if m.Git.HTTPS != nil {
 				tokenSecret := *m.Git.HTTPS.TokenSecretRef
-				if tokenSecret.LockSecretDeletion {
-					r.unlockGitSecretDeletion(ctx, tf, tokenSecret.Name, tokenSecret.Namespace)
+				if tokenSecret.LockSecretDeletion && action == "lock" {
+					err := r.lockGitSecretDeletion(ctx, tf, tokenSecret.Name, tokenSecret.Namespace)
+					if err != nil {
+						reqLogger.Error(err, fmt.Sprintf("Can't lock %s secret in %s", tokenSecret.Name, tokenSecret.Namespace))
+					} else {
+						reqLogger.V(1).Info(fmt.Sprintf("Successfully locked %s secret in %s", tokenSecret.Name, tokenSecret.Namespace))
+					}
+				} else {
+					err := r.unlockGitSecretDeletion(ctx, tf, tokenSecret.Name, tokenSecret.Namespace)
+					if err != nil {
+						reqLogger.Error(err, fmt.Sprintf("Can't unlock %s secret in %s", tokenSecret.Name, tokenSecret.Namespace))
+					} else {
+						reqLogger.V(1).Info(fmt.Sprintf("Successfully unlocked %s secret in %s", tokenSecret.Name, tokenSecret.Namespace))
+					}
 				}
 			}
 			if m.Git.SSH != nil {
 				tokenSecret := *m.Git.SSH.SSHKeySecretRef
-				if tokenSecret.LockSecretDeletion {
-					r.unlockGitSecretDeletion(ctx, tf, tokenSecret.Name, tokenSecret.Namespace)
+				if tokenSecret.LockSecretDeletion && action == "lock" {
+					err := r.lockGitSecretDeletion(ctx, tf, tokenSecret.Name, tokenSecret.Namespace)
+					if err != nil {
+						reqLogger.Error(err, fmt.Sprintf("Can't lock %s secret in %s", tokenSecret.Name, tokenSecret.Namespace))
+					} else {
+						reqLogger.V(1).Info(fmt.Sprintf("Successfully locked %s secret in %s", tokenSecret.Name, tokenSecret.Namespace))
+					}
+				} else {
+					err := r.unlockGitSecretDeletion(ctx, tf, tokenSecret.Name, tokenSecret.Namespace)
+					if err != nil {
+						reqLogger.Error(err, fmt.Sprintf("Can't unlock %s secret in %s", tokenSecret.Name, tokenSecret.Namespace))
+					} else {
+						reqLogger.V(1).Info(fmt.Sprintf("Successfully unlocked %s secret in %s", tokenSecret.Name, tokenSecret.Namespace))
+					}
 				}
 			}
 		}
@@ -1393,8 +1419,7 @@ func (r *ReconcileTerraform) updateFinalizer(tf *tfv1beta1.Terraform, ctx contex
 	if tf.Status.Phase == tfv1beta1.PhaseDeleted {
 		if utils.ListContainsStr(finalizers, terraformFinalizer) {
 			tf.SetFinalizers(utils.ListRemoveStr(finalizers, terraformFinalizer))
-			// Secret deletion logic
-			checkSecret(tf)
+			finalizeSecret(tf, "unlock")
 			return true
 		}
 	}
@@ -1402,20 +1427,15 @@ func (r *ReconcileTerraform) updateFinalizer(tf *tfv1beta1.Terraform, ctx contex
 	if tf.Spec.IgnoreDelete && len(finalizers) > 0 {
 		if utils.ListContainsStr(finalizers, terraformFinalizer) {
 			tf.SetFinalizers(utils.ListRemoveStr(finalizers, terraformFinalizer))
-			// Secret deletion logic
-			checkSecret(tf)
+			finalizeSecret(tf, "unlock")
 			return true
 		}
-	}
-
-	if tf.Spec.IgnoreDelete {
-		// Secret deletion logic
-		checkSecret(tf)
 	}
 
 	if !tf.Spec.IgnoreDelete {
 		if !utils.ListContainsStr(finalizers, terraformFinalizer) {
 			tf.SetFinalizers(append(finalizers, terraformFinalizer))
+			finalizeSecret(tf, "lock")
 			return true
 		}
 	}
@@ -1574,9 +1594,6 @@ func (r *ReconcileTerraform) formatJobSSHConfig(ctx context.Context, reqLogger l
 			if ns == "" {
 				ns = tf.Namespace
 			}
-			if m.Git.SSH.SSHKeySecretRef.LockSecretDeletion {
-				r.lockGitSecretDeletion(ctx, tf, m.Git.SSH.SSHKeySecretRef.Name, m.Git.SSH.SSHKeySecretRef.Namespace)
-			}
 			key, err := loadPassword(ctx, r.Client, k, m.Git.SSH.SSHKeySecretRef.Name, ns)
 			if err != nil {
 				return dataAsByte, err
@@ -1662,10 +1679,6 @@ func (r *ReconcileTerraform) setupAndRun(ctx context.Context, tf *tfv1beta1.Terr
 				tokenSecret := *m.Git.HTTPS.TokenSecretRef
 				if tokenSecret.Key == "" {
 					tokenSecret.Key = "token"
-				}
-				//
-				if m.Git.HTTPS.TokenSecretRef.LockSecretDeletion {
-					r.lockGitSecretDeletion(ctx, tf, tokenSecret.Name, tokenSecret.Namespace)
 				}
 				gitAskpass, err := r.createGitAskpass(ctx, tokenSecret)
 				if err != nil {
@@ -2738,65 +2751,32 @@ func (r ReconcileTerraform) loadSecret(ctx context.Context, name, namespace stri
 	return secret, nil
 }
 
-type gitSecret struct {
-	Name      string
-	Namespace string
-}
-
-type gitSecretDump struct {
-	gitSecrets  []gitSecret
-	initialized bool
-}
-
-func (g *gitSecretDump) make(tf *tfv1beta1.Terraform) {
-	for _, item := range tf.Spec.SCMAuthMethods {
-		if item.Git.HTTPS != nil {
-			secret := gitSecret{Name: item.Git.HTTPS.TokenSecretRef.Name}
-			if item.Git.HTTPS.TokenSecretRef.Namespace == "" {
-				secret.Namespace = "default"
-			}
-			g.gitSecrets = append(g.gitSecrets, secret)
-		}
-		if item.Git.SSH != nil {
-			secret := gitSecret{Name: item.Git.SSH.SSHKeySecretRef.Name}
-			if item.Git.SSH.SSHKeySecretRef.Namespace == "" {
-				secret.Namespace = "default"
-			}
-			g.gitSecrets = append(g.gitSecrets, secret)
-		}
-		if len(g.gitSecrets) > 0 {
-			g.initialized = true
-		}
-	}
-}
-
 func (r ReconcileTerraform) lockGitSecretDeletion(ctx context.Context, tf *tfv1beta1.Terraform, name, namespace string) error {
 	secret, err := r.loadSecret(ctx, name, namespace)
 	if err != nil {
 		return err
 	}
 	if !controllerutil.ContainsFinalizer(secret, terraformFinalizer) {
-		// Вставить логгер
-		fmt.Println("Adding secret finalizer")
 		controllerutil.AddFinalizer(secret, terraformFinalizer)
 		err := r.Client.Update(ctx, secret)
-		fmt.Println(err)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func (r ReconcileTerraform) unlockGitSecretDeletion(ctx context.Context, tf *tfv1beta1.Terraform, name, namespace string) error {
-	fmt.Println("testfunc")
 	secret, err := r.loadSecret(ctx, name, namespace)
 	if err != nil {
 		return err
 	}
 	if controllerutil.ContainsFinalizer(secret, terraformFinalizer) {
-		// Вставить логгер
-		fmt.Println("Removing secret finalizer")
 		controllerutil.RemoveFinalizer(secret, terraformFinalizer)
 		err := r.Client.Update(ctx, secret)
-		fmt.Println(err)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
