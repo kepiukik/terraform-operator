@@ -534,7 +534,7 @@ func (r *ReconcileTerraform) Reconcile(ctx context.Context, request reconcile.Re
 	// Final delete by removing finalizers
 	if tf.Status.Phase == tfv1beta1.PhaseDeleted {
 		reqLogger.Info("Remove finalizers")
-		_ = updateFinalizer(tf)
+		_ = r.updateFinalizer(tf, ctx)
 		err := r.update(ctx, tf)
 		if err != nil {
 			r.Recorder.Event(tf, "Warning", "ProcessingError", err.Error())
@@ -544,7 +544,7 @@ func (r *ReconcileTerraform) Reconcile(ctx context.Context, request reconcile.Re
 	}
 
 	// Finalizers
-	if updateFinalizer(tf) {
+	if r.updateFinalizer(tf, ctx) {
 		err := r.update(ctx, tf)
 		if err != nil {
 			return reconcile.Result{}, err
@@ -1369,12 +1369,32 @@ func (r ReconcileTerraform) createPluginPod(ctx context.Context, logger logr.Log
 // the finalizer is added.
 //
 // The finalizer will be responsible for starting the destroy-workflow.
-func updateFinalizer(tf *tfv1beta1.Terraform) bool {
+
+func (r *ReconcileTerraform) updateFinalizer(tf *tfv1beta1.Terraform, ctx context.Context) bool {
 	finalizers := tf.GetFinalizers()
+
+	checkSecret := func(tf *tfv1beta1.Terraform) {
+		for _, m := range tf.Spec.SCMAuthMethods {
+			if m.Git.HTTPS != nil {
+				tokenSecret := *m.Git.HTTPS.TokenSecretRef
+				if tokenSecret.LockSecretDeletion {
+					r.unlockGitSecretDeletion(ctx, tf, tokenSecret.Name, tokenSecret.Namespace)
+				}
+			}
+			if m.Git.SSH != nil {
+				tokenSecret := *m.Git.SSH.SSHKeySecretRef
+				if tokenSecret.LockSecretDeletion {
+					r.unlockGitSecretDeletion(ctx, tf, tokenSecret.Name, tokenSecret.Namespace)
+				}
+			}
+		}
+	}
 
 	if tf.Status.Phase == tfv1beta1.PhaseDeleted {
 		if utils.ListContainsStr(finalizers, terraformFinalizer) {
 			tf.SetFinalizers(utils.ListRemoveStr(finalizers, terraformFinalizer))
+			// Secret deletion logic
+			checkSecret(tf)
 			return true
 		}
 	}
@@ -1382,8 +1402,15 @@ func updateFinalizer(tf *tfv1beta1.Terraform) bool {
 	if tf.Spec.IgnoreDelete && len(finalizers) > 0 {
 		if utils.ListContainsStr(finalizers, terraformFinalizer) {
 			tf.SetFinalizers(utils.ListRemoveStr(finalizers, terraformFinalizer))
+			// Secret deletion logic
+			checkSecret(tf)
 			return true
 		}
+	}
+
+	if tf.Spec.IgnoreDelete {
+		// Secret deletion logic
+		checkSecret(tf)
 	}
 
 	if !tf.Spec.IgnoreDelete {
@@ -1547,8 +1574,8 @@ func (r *ReconcileTerraform) formatJobSSHConfig(ctx context.Context, reqLogger l
 			if ns == "" {
 				ns = tf.Namespace
 			}
-			if m.Git.SSH.SSHKeySecretRef.TakeOwnership {
-				r.takeGitSecretOwnership(ctx, tf, m.Git.SSH.SSHKeySecretRef.Name, m.Git.SSH.SSHKeySecretRef.Namespace)
+			if m.Git.SSH.SSHKeySecretRef.LockSecretDeletion {
+				r.lockGitSecretDeletion(ctx, tf, m.Git.SSH.SSHKeySecretRef.Name, m.Git.SSH.SSHKeySecretRef.Namespace)
 			}
 			key, err := loadPassword(ctx, r.Client, k, m.Git.SSH.SSHKeySecretRef.Name, ns)
 			if err != nil {
@@ -1637,8 +1664,8 @@ func (r *ReconcileTerraform) setupAndRun(ctx context.Context, tf *tfv1beta1.Terr
 					tokenSecret.Key = "token"
 				}
 				//
-				if m.Git.HTTPS.TokenSecretRef.TakeOwnership {
-					r.takeGitSecretOwnership(ctx, tf, tokenSecret.Name, tokenSecret.Namespace)
+				if m.Git.HTTPS.TokenSecretRef.LockSecretDeletion {
+					r.lockGitSecretDeletion(ctx, tf, tokenSecret.Name, tokenSecret.Namespace)
 				}
 				gitAskpass, err := r.createGitAskpass(ctx, tokenSecret)
 				if err != nil {
@@ -2743,12 +2770,11 @@ func (g *gitSecretDump) make(tf *tfv1beta1.Terraform) {
 	}
 }
 
-func (r ReconcileTerraform) takeGitSecretOwnership(ctx context.Context, tf *tfv1beta1.Terraform, name, namespace string) error {
+func (r ReconcileTerraform) lockGitSecretDeletion(ctx context.Context, tf *tfv1beta1.Terraform, name, namespace string) error {
 	secret, err := r.loadSecret(ctx, name, namespace)
 	if err != nil {
 		return err
 	}
-	controllerutil.SetControllerReference(tf, secret, r.Scheme)
 	if !controllerutil.ContainsFinalizer(secret, terraformFinalizer) {
 		// Вставить логгер
 		fmt.Println("Adding secret finalizer")
@@ -2759,7 +2785,7 @@ func (r ReconcileTerraform) takeGitSecretOwnership(ctx context.Context, tf *tfv1
 	return nil
 }
 
-func (r ReconcileTerraform) removeGitSecretOwnership(ctx context.Context, tf *tfv1beta1.Terraform, name, namespace string) error {
+func (r ReconcileTerraform) unlockGitSecretDeletion(ctx context.Context, tf *tfv1beta1.Terraform, name, namespace string) error {
 	fmt.Println("testfunc")
 	secret, err := r.loadSecret(ctx, name, namespace)
 	if err != nil {

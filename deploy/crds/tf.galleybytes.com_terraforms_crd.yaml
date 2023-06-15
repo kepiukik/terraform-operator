@@ -288,6 +288,10 @@ spec:
                                 key:
                                   description: Key in the secret ref. Default to `token`
                                   type: string
+                                lockSecretDeletion:
+                                  description: Set finalizer from controller on the
+                                    secret
+                                  type: boolean
                                 name:
                                   description: Name the secret name that has the token
                                     or password
@@ -296,10 +300,6 @@ spec:
                                   description: Namespace of the secret; Default is
                                     the namespace of the terraform resource
                                   type: string
-                                takeOwnership:
-                                  description: Set finalizer && ownerReference from
-                                    controller on the secret
-                                  type: boolean
                               required:
                               - name
                               type: object
@@ -319,6 +319,10 @@ spec:
                                 key:
                                   description: Key in the secret ref. Default to `id_rsa`
                                   type: string
+                                lockSecretDeletion:
+                                  description: Set finalizer from controller on the
+                                    secret
+                                  type: boolean
                                 name:
                                   description: Name the secret name that has the SSH
                                     key
@@ -327,10 +331,6 @@ spec:
                                   description: Namespace of the secret; Default is
                                     the namespace of the terraform resource
                                   type: string
-                                takeOwnership:
-                                  description: Set finalizer && ownerReference from
-                                    controller on the secret
-                                  type: boolean
                               required:
                               - name
                               type: object
@@ -401,6 +401,9 @@ spec:
                       key:
                         description: Key in the secret ref. Default to `id_rsa`
                         type: string
+                      lockSecretDeletion:
+                        description: Set finalizer from controller on the secret
+                        type: boolean
                       name:
                         description: Name the secret name that has the SSH key
                         type: string
@@ -408,10 +411,6 @@ spec:
                         description: Namespace of the secret; Default is the namespace
                           of the terraform resource
                         type: string
-                      takeOwnership:
-                        description: Set finalizer && ownerReference from controller
-                          on the secret
-                        type: boolean
                     required:
                     - name
                     type: object
